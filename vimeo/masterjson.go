@@ -52,6 +52,28 @@ type MasterJson struct {
 	Audio   []Audio `json:"audio"`
 }
 
+func ConsolidateTempFiles(output io.Writer, results []*os.File) error {
+  for _, result := range results {
+    file, err := os.Open(result.Name())
+
+    if err != nil {
+      return err
+    }
+
+    io.Copy(output, file)
+
+    if err := file.Close(); err != nil {
+        return err
+    }
+
+    if err := os.Remove(file.Name()); err != nil {
+        return err
+    }
+  }
+
+  return nil
+}
+
 func (v *Video) DecodedInitSegment() ([]byte, error) {
 	decoded, err := base64.StdEncoding.DecodeString(v.InitSegment)
 	if err != nil {
@@ -182,33 +204,49 @@ func (mj *MasterJson) AudioSegmentUrls(masterJsonUrl *url.URL, id string) ([]*ur
 	return urls, nil
 }
 
-// func (mj *MasterJson) CreateVideoFile(output io.Writer, masterJsonUrl *url.URL, id string, client *Client) error {
-//   video, err := mj.FindVideo(id)
-//   if err != nil {
-//     return err
-//   }
+func (mj *MasterJson) CreateVideoFile(output io.Writer, masterJsonUrl *url.URL, id string, client *Client) error {
+  video, err := mj.FindVideo(id)
+  if err != nil {
+    return err
+  }
 
-//   initSegment, err := video.DecodedInitSegment()
-//   if err != nil {
-//     return err
-//   }
-//   output.Write(initSegment)
+  initSegment, err := video.DecodedInitSegment()
+  if err != nil {
+    return err
+  }
+  output.Write(initSegment)
 
-//   videoSegmentUrls, err := mj.VideoSegmentUrls(masterJsonUrl, id)
-//   if err != nil {
-//     return err
-//   }
+  videoSegmentUrls, err := mj.VideoSegmentUrls(masterJsonUrl, id)
+  if err != nil {
+    return err
+  }
 
-//   for _, videoSegmentUrl := range videoSegmentUrls {
-//     fmt.Println("Downloading " + videoSegmentUrl.String())
-//     err = client.Download(videoSegmentUrl, output)
-//     if err != nil {
-//       return err
-//     }
-//   }
+  concurrency := 50
+  var g errgroup.Group
+  g.SetLimit(concurrency)
+  results := make([]*os.File, len(videoSegmentUrls))
 
-//   return nil
-// }
+  for i, videoSegmentUrl := range videoSegmentUrls {
+    i, videoSegmentUrl := i, videoSegmentUrl // https://golang.org/doc/faq#closures_and_goroutines
+    g.Go(func() error {
+      fmt.Println("Downloading " + videoSegmentUrl.String())
+      file, err := client.Download(videoSegmentUrl)
+      if err == nil {
+        results[i] = file
+      }
+
+      return err
+    })
+  }
+
+  if err := g.Wait(); err != nil {
+    return err
+  }
+
+  ConsolidateTempFiles(output, results)
+
+  return nil
+}
 
 func (mj *MasterJson) CreateAudioFile(output io.Writer, masterJsonUrl *url.URL, id string, client *Client) error {
 	audio, err := mj.FindAudio(id)
@@ -227,7 +265,7 @@ func (mj *MasterJson) CreateAudioFile(output io.Writer, masterJsonUrl *url.URL, 
 		return err
 	}
 
-  concurrency := 100
+  concurrency := 50
   var g errgroup.Group
   g.SetLimit(concurrency)
   results := make([]*os.File, len(audioSegmentUrls))
@@ -242,7 +280,6 @@ func (mj *MasterJson) CreateAudioFile(output io.Writer, masterJsonUrl *url.URL, 
         results[i] = file
       }
 
-      fmt.Printf("work: %d\n", i)
       return err
     })
 	}
@@ -251,24 +288,7 @@ func (mj *MasterJson) CreateAudioFile(output io.Writer, masterJsonUrl *url.URL, 
     return err
   }
 
-  // reduce, pipe into one output sequentially then cleanup
-  for _, result := range results {
-    file, err := os.Open(result.Name())
-
-    if err != nil {
-      panic(err)
-    }
-
-    io.Copy(output, file)
-
-    if err := file.Close(); err != nil {
-        panic(err)
-    }
-
-    if err := os.Remove(file.Name()); err != nil {
-        panic(err)
-    }
-  }
+  ConsolidateTempFiles(output, results)
 
 	return nil
 }
