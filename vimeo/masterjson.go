@@ -19,7 +19,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+  "os"
 	"net/url"
+
+  "golang.org/x/sync/errgroup"
 )
 
 type Segment struct {
@@ -179,33 +182,33 @@ func (mj *MasterJson) AudioSegmentUrls(masterJsonUrl *url.URL, id string) ([]*ur
 	return urls, nil
 }
 
-func (mj *MasterJson) CreateVideoFile(output io.Writer, masterJsonUrl *url.URL, id string, client *Client) error {
-	video, err := mj.FindVideo(id)
-	if err != nil {
-		return err
-	}
+// func (mj *MasterJson) CreateVideoFile(output io.Writer, masterJsonUrl *url.URL, id string, client *Client) error {
+//   video, err := mj.FindVideo(id)
+//   if err != nil {
+//     return err
+//   }
 
-	initSegment, err := video.DecodedInitSegment()
-	if err != nil {
-		return err
-	}
-	output.Write(initSegment)
+//   initSegment, err := video.DecodedInitSegment()
+//   if err != nil {
+//     return err
+//   }
+//   output.Write(initSegment)
 
-	videoSegmentUrls, err := mj.VideoSegmentUrls(masterJsonUrl, id)
-	if err != nil {
-		return err
-	}
+//   videoSegmentUrls, err := mj.VideoSegmentUrls(masterJsonUrl, id)
+//   if err != nil {
+//     return err
+//   }
 
-	for _, videoSegmentUrl := range videoSegmentUrls {
-		fmt.Println("Downloading " + videoSegmentUrl.String())
-		err = client.Download(videoSegmentUrl, output)
-		if err != nil {
-			return err
-		}
-	}
+//   for _, videoSegmentUrl := range videoSegmentUrls {
+//     fmt.Println("Downloading " + videoSegmentUrl.String())
+//     err = client.Download(videoSegmentUrl, output)
+//     if err != nil {
+//       return err
+//     }
+//   }
 
-	return nil
-}
+//   return nil
+// }
 
 func (mj *MasterJson) CreateAudioFile(output io.Writer, masterJsonUrl *url.URL, id string, client *Client) error {
 	audio, err := mj.FindAudio(id)
@@ -224,13 +227,48 @@ func (mj *MasterJson) CreateAudioFile(output io.Writer, masterJsonUrl *url.URL, 
 		return err
 	}
 
-	for _, videoSegmentUrl := range audioSegmentUrls {
-		fmt.Println("Downloading " + videoSegmentUrl.String())
-		err = client.Download(videoSegmentUrl, output)
-		if err != nil {
-			return err
-		}
+  concurrency := 100
+  var g errgroup.Group
+  g.SetLimit(concurrency)
+  results := make([]*os.File, len(audioSegmentUrls))
+
+  // map
+	for i, audioSegmentUrl := range audioSegmentUrls {
+    i, audioSegmentUrl := i, audioSegmentUrl; // https://golang.org/doc/faq#closures_and_goroutines
+    g.Go(func() error {
+      fmt.Println("Downloading " + audioSegmentUrl.String());
+      file, err := client.Download(audioSegmentUrl)
+      if err == nil {
+        results[i] = file
+      }
+
+      fmt.Printf("work: %d\n", i)
+      return err
+    })
 	}
+
+  if err := g.Wait(); err != nil {
+    return err
+  }
+
+  // reduce, pipe into one output sequentially then cleanup
+  for _, result := range results {
+    file, err := os.Open(result.Name())
+
+    if err != nil {
+      panic(err)
+    }
+
+    io.Copy(output, file)
+
+    if err := file.Close(); err != nil {
+        panic(err)
+    }
+
+    if err := os.Remove(file.Name()); err != nil {
+        panic(err)
+    }
+  }
 
 	return nil
 }
